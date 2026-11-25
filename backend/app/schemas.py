@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 T = TypeVar("T")
 
@@ -27,5 +27,9 @@ class EntryPayload(BaseModel):
 
 
 class ActionPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     action: str
     remark: str | None = None
+    values: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)

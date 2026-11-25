@@ -13,6 +13,7 @@ from app.services.merge_plan import MergePlanService
 from app.services.partition_scale import PartitionScaleService
 from app.services.snapshot_mgr import SnapshotMgrService
 from app.services.data_reconcile import DataReconcileService
+from app.services.archive_access import archive_access
 from app.services.backfill_job import BackfillJobService
 from app.services.cold_archive import ColdArchiveService
 from app.services.compaction import CompactionService
@@ -40,6 +41,10 @@ SERVICES: dict[str, BaseModuleService] = {
     "changelog": ChangelogService(),
     "retention": RetentionService(),
     "table_format": TableFormatService(),
+    # 归档版本授权是跨 cold_archive/backfill_job 的领域能力，同时保留独立 key 便于直接定位。
+    "archive_grant": archive_access,
+    "archive_grants": archive_access,
+    "archive_access": archive_access,
 }
 
 

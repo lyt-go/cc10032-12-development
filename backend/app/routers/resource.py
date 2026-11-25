@@ -94,5 +94,16 @@ def create_entry(module: str, payload: EntryPayload) -> ActionResult:
 @router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
 def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
     service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
-    return ActionResult(ok=entry is not None, message=message, entry=entry)
+    dumped = payload.model_dump()
+    params: dict[str, Any] = dict(payload.values or {})
+    params.update(payload.params or {})
+    params.update({
+        key: value
+        for key, value in dumped.items()
+        if key not in {"action", "remark", "values", "params"}
+    })
+    if payload.remark:
+        params.setdefault("remark", payload.remark)
+    entry, message = service.run_action(entry_id, payload.action.strip(), params)
+    ok = bool(entry.get("ok")) if isinstance(entry, dict) and "ok" in entry else entry is not None
+    return ActionResult(ok=ok, message=message, entry=entry)

@@ -29,10 +29,11 @@ export async function runAction(
   key: string,
   id: number,
   action: string,
+  params: Record<string, unknown> = {},
 ): Promise<ActionResult> {
   const response = await request(`/api/${key}/${id}/actions`, {
     method: 'POST',
-    body: JSON.stringify({ action }),
+    body: JSON.stringify({ action, ...params }),
   })
   return await response.json()
 }

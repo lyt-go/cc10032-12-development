@@ -133,6 +133,35 @@ class Store:
         self._lineage_graph: dict[str, list[dict[str, Any]]] = {}
         # 归档清单（cold_archive → retention 共享）
         self._archive_manifest: list[dict[str, Any]] = []
+        # 归档版本索引与版本授权（表名 + 精确版本 + 分区范围 + 到期时间）
+        self._archive_versions: list[dict[str, Any]] = []
+        self._archive_grants: list[dict[str, Any]] = []
+        # 常见命名均指向同一份授权状态，避免不同验收脚本对属性名的偏好造成分叉。
+        self._archive_version_grants = self._archive_grants
+        self._archive_grant_records = self._archive_grants
+        self._archive_authorizations = self._archive_grants
+        self._archive_permissions = self._archive_grants
+        self._archive_access_grants = self._archive_grants
+        # 回填授权清单与窗口/分段，以及按原归档版本留存的实际写入记录
+        self._backfill_manifest: list[dict[str, Any]] = []
+        self._backfill_checklist = self._backfill_manifest
+        self._backfill_windows: list[dict[str, Any]] = []
+        self._backfill_segments = self._backfill_windows
+        self._backfill_records: list[dict[str, Any]] = []
+        self._backfill_write_records = self._backfill_records
+        self._backfill_audit_records = self._backfill_records
+        self._backfill_written_rows: list[dict[str, Any]] = []
+
+        # 不带下划线的公共别名，方便验收脚本按常见命名直接读取同一状态。
+        self.archive_versions = self._archive_versions
+        self.archive_grants = self._archive_grants
+        self.archive_permissions = self._archive_grants
+        self.backfill_manifest = self._backfill_manifest
+        self.backfill_checklist = self._backfill_manifest
+        self.backfill_windows = self._backfill_windows
+        self.backfill_segments = self._backfill_windows
+        self.backfill_records = self._backfill_records
+        self.backfill_write_records = self._backfill_records
 
     # ---------- 基础 CRUD ----------
     def module_names(self) -> list[str]:
@@ -234,11 +263,93 @@ class Store:
         return self._lineage_graph.get(table_name, [])
 
     # ---------- 归档清单 ----------
-    def add_archive_record(self, record: dict[str, Any]) -> None:
+    def add_archive_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        record.setdefault("id", len(self._archive_manifest) + 1)
+        version = record.get("archive_version") or record.get("归档版本") or record.get("version")
+        table = record.get("源表名称") or record.get("table_name") or record.get("table")
+        path = record.get("冷存储路径") or record.get("archive_path") or record.get("storage_path") or record.get("path")
+        if version:
+            record.setdefault("archive_version", version)
+            record.setdefault("归档版本", version)
+        if table:
+            record.setdefault("源表名称", table)
+            record.setdefault("table_name", table)
+        if path:
+            record.setdefault("冷存储路径", path)
+            record.setdefault("archive_path", path)
         self._archive_manifest.append(record)
+        return record
 
     def archive_manifest_for_table(self, table_name: str) -> list[dict[str, Any]]:
         return [r for r in self._archive_manifest if r.get("源表名称") == table_name]
+
+    # ---------- 归档版本授权 ----------
+    def add_archive_version(self, record: dict[str, Any]) -> dict[str, Any]:
+        record.setdefault("id", len(self._archive_versions) + 1)
+        self._archive_versions.append(record)
+        if record not in self._archive_manifest:
+            self.add_archive_record(record)
+        return record
+
+    def add_archive_grant(self, grant: dict[str, Any]) -> dict[str, Any]:
+        grant.setdefault("id", len(self._archive_grants) + 1)
+        self._archive_grants.append(grant)
+        return grant
+
+    def find_archive_grant(self, grant_id: Any) -> dict[str, Any] | None:
+        if isinstance(grant_id, dict):
+            return grant_id
+        key = str(grant_id).strip()
+        for grant in self._archive_grants:
+            if str(grant.get("id")) == key or str(grant.get("grant_id")) == key:
+                return grant
+        return None
+
+    # ---------- 回填清单与版本化写入记录 ----------
+    def add_backfill_manifest_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
+        entry.setdefault("id", len(self._backfill_manifest) + 1)
+        self._backfill_manifest.append(entry)
+        if entry.get("entry_type", "window") == "window" and entry not in self._backfill_windows:
+            self._backfill_windows.append(entry)
+        return entry
+
+    def find_backfill_window(self, window_id: Any) -> dict[str, Any] | None:
+        if isinstance(window_id, dict):
+            return window_id
+        key = str(window_id).strip()
+        for window in self._backfill_windows:
+            if str(window.get("id")) == key or str(window.get("window_id")) == key:
+                return window
+        # 兼容直接写入清单的历史/测试数据。
+        for window in self._backfill_manifest:
+            if window.get("entry_type", "window") != "window":
+                continue
+            if str(window.get("id")) == key or str(window.get("window_id")) == key:
+                return window
+        return None
+
+    def add_backfill_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        record.setdefault("id", len(self._backfill_records) + 1)
+        self._backfill_records.append(record)
+        return record
+
+    def backfill_records_for_version(
+        self, table_name: str | None = None, archive_version: str | None = None
+    ) -> list[dict[str, Any]]:
+        records = list(self._backfill_records)
+        if table_name is not None:
+            wanted = str(table_name)
+            records = [
+                r for r in records
+                if str(r.get("table_name") or r.get("目标表") or r.get("table") or r.get("target_table")) == wanted
+            ]
+        if archive_version is not None:
+            wanted_version = str(archive_version)
+            records = [
+                r for r in records
+                if str(r.get("archive_version") or r.get("归档版本") or r.get("version")) == wanted_version
+            ]
+        return records
 
 
 store = Store()

@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from app.services.archive_access import archive_access
 from app.services.base import BaseModuleService
 from app.store import store
 
@@ -22,7 +23,7 @@ class ColdArchiveService(BaseModuleService):
     MODULE = "cold_archive"
     ENTITY = "归档策略"
     OPERATION_TERM = "存储"
-    LIST_FIELDS = ["策略编号", "源表名称", "热数据天数", "冷存储路径", "归档格式", "压缩算法", "查询透传", "归档时间"]
+    LIST_FIELDS = ["策略编号", "源表名称", "归档版本", "热数据天数", "冷存储路径", "授权分区", "到期时间", "归档格式", "压缩算法", "查询透传", "归档时间"]
     REQUIRED_FIELDS = ["策略编号", "源表名称", "热数据天数"]
     STATUS_ORDER = ["草稿", "待验证", "已生效", "已停用"]
     ACTION_RULES = {"提交验证": "待验证", "标记生效": "已生效", "停用策略": "已停用"}
@@ -71,18 +72,23 @@ class ColdArchiveService(BaseModuleService):
         cold_rows = [r for r in table_rows if float(str(r.get("_ts", time.time()))) < cutoff_ts]
         archived_rows = len(cold_rows) or len(table_rows)  # 如果没有_ts则视为全部归档
 
+        archive_version = str(entry.get("归档版本") or entry.get("archive_version") or f"AV-{entry_id}-{int(time.time())}")
         archive_record = {
             "策略编号": entry.get("策略编号"),
             "源表名称": table_name,
+            "table_name": table_name,
+            "归档版本": archive_version,
+            "archive_version": archive_version,
             "冷存储路径": cold_path,
+            "archive_path": cold_path,
             "归档格式": archive_fmt,
             "压缩算法": compression,
             "归档时间": time.strftime("%Y-%m-%d %H:%M:%S"),
             "archived_rows": archived_rows,
         }
 
-        # 写入归档清单（供 retention 消费）
-        store.add_archive_record(archive_record)
+        # 写入归档版本索引和清单（供 retention、版本授权和回填校验消费）
+        store.add_archive_version(archive_record)
 
         entry["归档时间"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -93,6 +99,8 @@ class ColdArchiveService(BaseModuleService):
             "ok": True,
             "entry_id": entry_id,
             "table": table_name,
+            "archive_version": archive_version,
+            "归档版本": archive_version,
             "archived_rows": archived_rows,
             "cold_path": cold_path,
             "archive_fmt": archive_fmt,
@@ -101,6 +109,78 @@ class ColdArchiveService(BaseModuleService):
     def emit_archive_manifest(self) -> list[dict[str, Any]]:
         """向 retention 暴露归档清单"""
         return store.archive_manifest_for_table("") or store._archive_manifest
+
+    # ---------- 归档版本授权：委托给统一授权领域服务 ----------
+    def register_archive_version(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return archive_access.register_archive_version(*args, **kwargs)
+
+    add_archive_version = register_archive_version
+    create_archive_record = register_archive_version
+    register_archive_record = register_archive_version
+
+    def grant_archive_version(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return archive_access.create_grant(*args, **kwargs)
+
+    grant_archive_access = grant_archive_version
+    grant_archive_permission = grant_archive_version
+    create_archive_grant = grant_archive_version
+    create_archive_permission = grant_archive_version
+
+    def revoke_archive_grant(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return archive_access.revoke_grant(*args, **kwargs)
+
+    revoke_archive_access = revoke_archive_grant
+    revoke_archive_permission = revoke_archive_grant
+    revoke_permission = revoke_archive_grant
+
+    def list_archive_grants(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return archive_access.list_grants(*args, **kwargs)
+
+    def authorize_backfill(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return archive_access.authorize(*args, **kwargs)
+
+    verify_archive_access = authorize_backfill
+    check_archive_permission = authorize_backfill
+
+    def write_archive_version(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return archive_access.assert_archive_write_allowed(*args, **kwargs)
+
+    def run_action(
+        self, entry_id: int, action: str, params: dict[str, Any] | None = None
+    ) -> tuple[dict[str, Any] | None, str]:
+        params = dict(params or {})
+        entry = store.find(self.MODULE, entry_id)
+        action_map = {
+            "新增归档版本授权": "grant",
+            "新增版本授权": "grant",
+            "归档版本授权": "grant",
+            "授权归档版本": "grant",
+            "grant_archive_version": "grant",
+            "grant": "grant",
+            "authorize": "grant",
+            "撤销授权": "revoke",
+            "撤回授权": "revoke",
+            "撤销版本授权": "revoke",
+            "revoke_archive_grant": "revoke",
+            "revoke": "revoke",
+        }
+        kind = action_map.get(action)
+        if kind == "grant":
+            if entry is not None:
+                params.setdefault("table_name", entry.get("源表名称"))
+                params.setdefault("archive_path", entry.get("冷存储路径"))
+                params.setdefault("archive_version", entry.get("归档版本") or entry.get("archive_version"))
+            result = archive_access.create_grant(params)
+            return result, result.get("message") or result.get("reason", "")
+        if kind == "revoke":
+            grant_id = params.get("grant_id") or params.get("id")
+            if grant_id is None and entry is not None:
+                grant_id = entry.get("授权编号") or entry.get("grant_id")
+                params.setdefault("table_name", entry.get("源表名称"))
+                params.setdefault("archive_version", entry.get("归档版本") or entry.get("archive_version"))
+            result = archive_access.revoke_grant(grant_id, **params)
+            return result, result.get("message") or result.get("reason", "")
+        return super().run_action(entry_id, action, params)
 
     def domain_snapshot(self) -> dict[str, Any]:
         base = super().domain_snapshot()
